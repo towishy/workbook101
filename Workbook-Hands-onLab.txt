@@ -1,0 +1,44 @@
+## KQL Workbook 101 세션 Hands-on-Lab 자료입니다.
+## jaele@microsoft.com
+
+[1번째 쿼리]
+
+SigninLogs
+| extend Result = iff(ResultType == 0, "Success", "Failure")
+| summarize count() by Result
+
+[2번째 쿼리]
+
+print {signin_status}
+
+[3번째 쿼리]
+
+SigninLogs
+| extend Result = iff(ResultType == 0, "Success", "Failure")
+| where Result == '{signin_status}'
+| project TimeGenerated, Identity, ResultDescription
+
+[4번째 쿼리]
+
+SigninLogs
+| summarize Count = count() by bin(TimeGenerated, 10m)
+| order by TimeGenerated asc
+
+[5번째 쿼리]
+
+SigninLogs
+| extend Result = iff(ResultType == 0, "Success", "Failure")
+| summarize count() by Result
+
+
+
+#. 참고 - SigninLogs 테이블의 성공/실패 카운트 ( 시간범위는 TimeRange로 지정 )
+ 
+SigninLogs
+| summarize 
+    SuccessCount = countif(ResultType == "0"), 
+    FailureCount = countif(ResultType != "0"), 
+    TotalCount = count()
+| extend 
+    SuccessRate = round(toreal(SuccessCount) / TotalCount * 100, 2),
+    FailureRate = round(toreal(FailureCount) / TotalCount * 100, 2)
