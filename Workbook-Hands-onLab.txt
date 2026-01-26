@@ -1,5 +1,4 @@
 ## KQL Workbook 101 세션 Hands-on-Lab 자료입니다.
-## jaele@microsoft.com
 
 [1번째 쿼리]
 
@@ -42,3 +41,4 @@ SigninLogs
 | extend 
     SuccessRate = round(toreal(SuccessCount) / TotalCount * 100, 2),
     FailureRate = round(toreal(FailureCount) / TotalCount * 100, 2)
+
