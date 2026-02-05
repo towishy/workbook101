@@ -1,0 +1,765 @@
+
+List sign-ins
+
+SigninLogs
+  // Query only successfull sign-ins
+  | where ResultType == 0
+  | where UserPrincipalName startswith "xxxx"
+
+List sign-ins from IPs
+
+let IPs = datatable(IPAddress: string) ["xxxx", "xxx"];
+IPs
+| join kind=leftouter (SigninLogs | summarize SignInCount = count() by IPAddress) on IPAddress
+| project IPAddress, SignInCount = iff(isnull(SignInCount), 0, SignInCount)
+
+
+List sign-ins from non-France IPs
+
+SigninLogs
+| where tostring(LocationDetails.countryOrRegion) != "FR"
+
+
+List sign-ins grouped by IPs with user, location and first seen/last
+
+SigninLogs
+| where UserPrincipalName in~ ("xx@xx.xxx", "yy@yy.yyy")
+| summarize Connections = count(), FirstSeen = min(TimeGenerated), LastSeen = max(TimeGenerated) by 
+    User = UserPrincipalName, 
+    IP = IPAddress, 
+    Country = tostring(LocationDetails.countryOrRegion), 
+    City = tostring(LocationDetails.city)
+
+
+List sign-ins without MFA (any method)
+This query lists all successful single-factor sign-ins regardless of the authentication method used. If the AuthenticationDetails array is empty (often the case for B2B scenarios), the method falls back to the CrossTenantAccessType value.
+
+SigninLogs
+// Only successful sign-ins
+| where ResultType == 0
+// Exclude Windows and Auth Broker apps
+| where AppDisplayName !in ("Windows Sign In", "Microsoft Authentication Broker")
+// Parse AuthenticationDetails array
+| extend details = parse_json(AuthenticationDetails)
+// Extract authenticationMethod from first step if available, else use CrossTenantAccessType
+| extend authenticationMethod = iif(array_length(details) > 0, tostring(details[0].authenticationMethod),
+                          iif(isnotempty(CrossTenantAccessType), tostring(CrossTenantAccessType), ""))
+// Keep only single-factor authentication attempts
+| where AuthenticationRequirement == "singleFactorAuthentication"
+// Exclude methods already satisfied (e.g. SSO)
+| where authenticationMethod != "Previously satisfied"
+// Add UserName and UPN suffix for entity correlation
+| extend UserName = split(UserPrincipalName, "@")[0], UserUPNSuffix = split(UserPrincipalName, "@")[1]
+// Extract device information
+| extend DeviceId = tostring(DeviceDetail.deviceId)
+| extend DeviceOperatingSystem = tostring(DeviceDetail.operatingSystem)
+// Project and reorder columns
+| project-reorder TimeGenerated, UserPrincipalName, UserName, UserUPNSuffix, AuthenticationRequirement, authenticationMethod, AuthenticationProtocol, DeviceId, DeviceOperatingSystem
+
+
+List sign-ins without MFA (only password method)
+This version filters sign-ins strictly using the "Password" method. It only includes records 
+where AuthenticationDetails is not empty and the first step is clearly marked as "Password".
+
+SigninLogs
+// Only successful sign-ins
+| where ResultType == 0
+// Exclude Windows and Auth Broker apps
+| where AppDisplayName !in ("Windows Sign In", "Microsoft Authentication Broker")
+// Parse AuthenticationDetails array
+| extend details = parse_json(AuthenticationDetails)
+// Extract authenticationMethod from first step if available, else use CrossTenantAccessType
+| extend authenticationMethod = iif(array_length(details) > 0, tostring(details[0].authenticationMethod),
+                          iif(isnotempty(CrossTenantAccessType), tostring(CrossTenantAccessType), ""))
+// Keep only single-factor authentication attempts
+| where AuthenticationRequirement == "singleFactorAuthentication"
+// Limit to password only authentication
+| where authenticationMethod == "Password"
+// Add UserName and UPN suffix for entity correlation
+| extend UserName = split(UserPrincipalName, "@")[0], UserUPNSuffix = split(UserPrincipalName, "@")[1]
+// Extract device information
+| extend DeviceId = tostring(DeviceDetail.deviceId)
+| extend DeviceOperatingSystem = tostring(DeviceDetail.operatingSystem)
+// Project and reorder columns
+| project-reorder TimeGenerated, UserPrincipalName, UserName, UserUPNSuffix, AuthenticationRequirement, authenticationMethod, AuthenticationProtocol, DeviceId, DeviceOperatingSystem
+
+
+
+List sign-ins without MFA (only password method) and excluded sign-ins coming from either a trusted network location or a compliant device
+
+SigninLogs
+  // Query only successfull sign-ins
+  | where ResultType == 0
+  // Ignore login to Windows and Microsoft Authentication Broker
+  | where AppDisplayName != "Windows Sign In" and AppDisplayName != "Microsoft Authentication Broker"  // Limit to password only authentication
+  // Limit to password only authentication
+  | extend authenticationMethod = tostring(parse_json(AuthenticationDetails)[0].authenticationMethod)
+  | where authenticationMethod == "Password"
+  // Limit to non MFA sign-ins
+  | where AuthenticationRequirement == "singleFactorAuthentication"
+  // Remove all sign-ins coming from either a trusted network location or a compliant device
+  | where NetworkLocationDetails == "[]" and DeviceDetail.isCompliant != true
+  // Add UserName and UserUPNSuffix for strong entity match
+  | extend UserName = split(UserPrincipalName,'@',0)[0], UserUPNSuffix = split(UserPrincipalName,'@',1)[0]
+  | extend DeviceId = tostring(DeviceDetail.deviceId)
+  | extend DeviceOperatingSystem = tostring(DeviceDetail.operatingSystem)
+  | project-reorder TimeGenerated, UserPrincipalName, AuthenticationRequirement, authenticationMethod, AuthenticationProtocol
+
+
+List sign-ins with MFA
+
+SigninLogs
+  // Query only successfull sign-ins
+  | where ResultType == 0
+  // Ignore login to Windows
+  | where AppDisplayName != "Windows Sign In"
+  // Limit to password only authentication
+  | extend authenticationStepRequirement = tostring(parse_json(AuthenticationDetails)[0].authenticationStepRequirement)
+  | where AuthenticationRequirement == "multiFactorAuthentication"
+  | project TimeGenerated , UserPrincipalName
+List sign-ins with MFA from IPs
+let allowedIPs = dynamic(["xxx.xxx.xxx.xxx", "yyy.yyy.yyy.yyy"]);
+SigninLogs
+  // Query only successfull sign-ins
+  | where ResultType == 0
+  // Ignore login to Windows
+  | where AppDisplayName != "Windows Sign In"
+  // Limit to password only authentication
+  | extend authenticationStepRequirement = tostring(parse_json(AuthenticationDetails)[0].authenticationStepRequirement)
+  | where AuthenticationRequirement == "multiFactorAuthentication"
+  | where IPAddress in (allowedIPs)
+| summarize count() by UserPrincipalName, IPAddress
+
+List sign-ins with MFA type
+
+SigninLogs
+| where AuthenticationRequirement == "multiFactorAuthentication"
+| where ResultType == 0
+| extend Step = parse_json(AuthenticationDetails)[1]
+| extend MFAMethod = tostring(Step.authenticationMethod)
+| where MFAMethod != "Previously satisfied" and isnotempty(MFAMethod)
+| project TimeGenerated, UserPrincipalName, AppDisplayName, MFAMethod, IPAddress, 
+ConditionalAccessStatus
+
+Groups sign-ins with MFA type/user
+
+SigninLogs
+| where AuthenticationRequirement == "multiFactorAuthentication"
+| where ResultType == 0
+| project UserPrincipalName, AuthenticationDetails
+| extend ['MFA Method'] = tostring(parse_json(AuthenticationDetails)[1].authenticationMethod)
+| where ['MFA Method'] != "Previously satisfied" and isnotempty(['MFA Method'])
+| summarize Count = count() by UserPrincipalName, ['MFA Method']
+List sign-ins with MFA with SMS
+
+SigninLogs
+| where ResultType == 0
+| extend AuthenticationDetailsArray = parse_json(AuthenticationDetails)
+| mv-expand AuthenticationDetailsArray
+| where AuthenticationDetailsArray.authenticationMethod == "Text message"
+
+List sign-ins with MFA with Call phone
+
+SigninLogs
+| where ResultType == 0
+| extend AuthenticationDetailsArray = parse_json(AuthenticationDetails)
+| mv-expand AuthenticationDetailsArray
+| where AuthenticationDetailsArray.authenticationMethod == "Phone call approval (Authentication phone)"
+
+Chart of MFA types used
+For your information, you can also retrieve this data in Entra ID (but it's limited to a maximum of 30 days):  
+https://entra.microsoft.com/#view/Microsoft_AAD_IAM/AuthenticationMethodsMenuBlade/~/AuthMethodsActivity > Usage tab.
+
+SigninLogs
+| where AuthenticationRequirement == "multiFactorAuthentication"
+| where ResultType == 0
+| project AuthenticationDetails
+| extend ['MFA Method'] = tostring(parse_json(AuthenticationDetails)[1].authenticationMethod)
+| summarize Count=count()by ['MFA Method']
+| where ['MFA Method'] != "Previously satisfied" and isnotempty(['MFA Method'])
+| sort by Count desc
+| render barchart with (title="Types of MFA Methods used")
+
+Result:
+
+
+List conditional access policy used
+
+SigninLogs
+// Additional Toggle to determine CA result for success/failure login
+//| where ResultType == "0"
+| where ConditionalAccessPolicies != "[]"
+| mv-expand ConditionalAccessPolicies
+| extend CADisplayName = tostring(ConditionalAccessPolicies.displayName)
+| extend CAResult = tostring(ConditionalAccessPolicies.result)
+| summarize Count=count() by CADisplayName, CAResult
+| sort by CADisplayName asc
+
+List the use of conditional access policies and their status (Success/Failure)
+
+SigninLogs
+| mv-expand todynamic(ConditionalAccessPolicies)
+| extend CAResult=tostring(ConditionalAccessPolicies.result), CAName=tostring(ConditionalAccessPolicies.displayName)
+| summarize TotalCount=count(),ResultSet=make_set(CAResult) by CAName
+| where not(ResultSet has_any ("success","failure"))
+| sort by CAName asc
+
+List successful sign-ins using a specific conditional access policy
+Replace xxx with the name of your conditional access policy.
+
+SigninLogs
+| mv-expand ConditionalAccessPolicies
+| where ConditionalAccessPolicies.displayName == "xxx"
+| where tostring(ConditionalAccessPolicies.result) == "success"
+| project 
+    TimeGenerated,
+    UserPrincipalName,
+    AppDisplayName,
+    IPAddress,
+    ConditionalAccessPolicyName = ConditionalAccessPolicies.displayName,
+    ConditionalAccessResult = ConditionalAccessPolicies.result
+List sign-ins in report-only mode for conditional access policies
+
+SigninLogs
+| mvexpand ConditionalAccessPolicies
+| where tostring(ConditionalAccessPolicies["result"]) startswith "reportOnly"
+| where tostring(ConditionalAccessPolicies["result"]) != "reportOnlyNotApplied"
+| project TimeGenerated,
+          UserPrincipalName,
+          AppDisplayName,
+          PolicyName = tostring(ConditionalAccessPolicies["displayName"]),
+          Result = tostring(ConditionalAccessPolicies["result"])
+| order by TimeGenerated desc
+authenticationMethod == "Phone call approval (Authentication phone)"
+
+
+List sign-in using phone call
+
+SigninLogs
+| where isnotempty(AuthenticationDetails)
+| extend AuthDetails = parse_json(AuthenticationDetails)
+| mv-expand AuthDetails
+| extend AuthMethod = tostring(AuthDetails.authenticationMethod)
+| where AuthMethod == "Phone call approval (Authentication phone)"
+
+
+List sign-in using SMS
+Be careful, this does NOT mean MFA with SMS. SMS sign-in is a feature that only uses SMS (  https://learn.microsoft.com/en-us/entra/identity/authentication/howto-authentication-sms-signin). If you want MFA with SMS, check before in this page.
+
+SigninLogs
+| where isnotempty(AuthenticationDetails)
+| extend AuthDetails = parse_json(AuthenticationDetails)
+| mv-expand AuthDetails
+| extend AuthMethod = tostring(AuthDetails.authenticationMethod)
+| where AuthMethod == "SMS Sign-in"
+
+List sign-in using device-code
+
+SigninLogs
+| where  AuthenticationProtocol == "deviceCode"
+
+
+List sign-in using QRCode
+
+SigninLogs
+| where isnotempty(AuthenticationDetails)
+| extend AuthDetails = parse_json(AuthenticationDetails)
+| mv-expand AuthDetails
+| where tostring(AuthDetails.authenticationMethod) == "QR code pin"
+
+Check  https://itpro-tips.com/kql-query-examples-for-microsoft-entra-id/#qr-code-added-to-the-user-by-an-administrator-for-qr-code-sign-in to identify when the QRCode was added by admin.
+
+
+List users, number of sign-ins and last sign-in date for a specific app in Entra ID
+In the following example, I use the Application ID 14d82eec-204b-4c2f-b7e8-296a70dab67e, which is Microsoft Graph Command Line Tools.
+
+SigninLogs
+| where AppId == "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+| summarize SignInCount = count(), LastSignIn = max(TimeGenerated) by UserPrincipalName
+| order by SignInCount desc
+
+List failed sign-ins with their reasons
+SigninLogs
+| where ResultType != 0
+| project TimeGenerated, UserPrincipalName, AppDisplayName, IPAddress, ResultDescription, ResultType
+
+List number of failed sign-ins with their reasons
+
+SigninLogs
+| where ResultType != 0
+| summarize Count=count() by UserPrincipalName, TimeGenerated, ResultDescription, ResultType
+| sort by Count desc nulls last
+List of successful and failed sign-ins by location
+
+SigninLogs
+| summarize Successful=countif(ResultType==0), Failed=countif(ResultType!=0) by Location
+
+List of failed MFA challenge
+
+SigninLogs
+| where ResultType == 50074
+| project UserDisplayName, Identity,UserPrincipalName, ResultDescription,  AppDisplayName, AppId, 
+ResourceDisplayName
+| summarize FailureCount=count(), FailedResources=dcount(ResourceDisplayName), 
+ResultDescription=any(ResultDescription) by UserDisplayName
+
+Pivot table of conditional access policy outcomes over the last 30 days
+Credits to  https://learnsentinel.blog/2022/05/09/azure-ad-conditional-access-insights-auditing-with-microsoft-sentinel/
+
+SigninLogs
+| where TimeGenerated > ago(30d)
+| extend CAPolicies = parse_json(ConditionalAccessPolicies)
+| mv-expand bagexpansion=array CAPolicies
+| evaluate bag_unpack(CAPolicies)
+| extend
+    PolicyOutcome = tostring(column_ifexists('result', "")),
+    PolicyName = column_ifexists('displayName', "")
+| evaluate pivot(PolicyOutcome, count(), PolicyName)
+
+
+
+Conditional access policies without success, failure, or unknown outcomes in the last 30 days
+Credits to  https://learnsentinel.blog/2022/05/09/azure-ad-conditional-access-insights-auditing-with-microsoft-sentinel/
+
+SigninLogs
+| where TimeGenerated > ago(30d)
+| project TimeGenerated, ConditionalAccessPolicies
+| mv-expand ConditionalAccessPolicies
+| extend PolicyResult = tostring(ConditionalAccessPolicies.result)
+| extend PolicyName = tostring(ConditionalAccessPolicies.displayName)
+| summarize PolicyResultsSet = make_set(PolicyResult) by PolicyName
+| where PolicyResultsSet !has "success"
+    and PolicyResultsSet !has "failure"
+    and PolicyResultsSet !has "unknownFutureValue"
+| sort by PolicyName asc
+
+List of sign-ins requiring MFA registration by location
+
+SigninLogs
+| where ResultType in ("50079","50072")
+| project TimeGenerated, UserPrincipalName, IPAddress, Location, ResultType, ResultDescription
+| order by TimeGenerated desc
+
+Resolve Entra ID / Azure AD Sign In errors
+When you encounter a sign-in error, the ResultDescription often shows Other, which isn't very helpful.
+Fabien Bader maintains a comprehensive list of Entra ID error codes with descriptions that you can leverage.
+Note: Full credit for the following KQL goes to him and his article:  https://cloudbrothers.info/en/entra-id-azure-ad-signin-errors/
+
+let ResolvedErrorCodes = externaldata(code: string, Message: string)
+['https://raw.githubusercontent.com/f-bader/EntraID-ErrorCodes/main/EntraIDErrorCodes.json']
+with (format='multijson');
+SigninLogs
+| where ResultType != 0
+| join kind=leftouter ResolvedErrorCodes on $left.ResultType == $right.code
+| extend ResultDescription = iff(ResultDescription == "Other", iff(isempty(Message), "Other", Message), ResultDescription)
+| project-away Message, code
+| project-reorder TimeGenerated, ResultType, ResultDescription
+
+
+List authentication timeline
+
+SigninLogs
+| where TimeGenerated > ago (180d)
+| where AuthenticationRequirement == "multiFactorAuthentication"
+| project TimeGenerated, AuthenticationDetails
+| extend ['MFA Method'] = tostring(parse_json(AuthenticationDetails)[1].authenticationMethod)
+| summarize Count=count()by ['MFA Method'], bin(TimeGenerated, 7d)
+| where ['MFA Method'] != "Previously satisfied" and isnotempty(['MFA Method']) 
+| render timechart with (ytitle="Count", xtitle="Day", title="MFA methods per week over time")
+
+
+
+
+
+List conditional access policies changes
+
+AuditLogs
+| where ActivityDisplayName == "Update policy"
+// Determine who initiated the policy update (user or app) - coalesce returns the first non-empty value
+| extend InitiatedByActor = coalesce(
+    tostring(InitiatedBy.user.userPrincipalName),
+    tostring(InitiatedBy.app.displayName),
+    tostring(InitiatedBy.user.displayName),
+    tostring(InitiatedBy.app.servicePrincipalId))
+// Categorize the initiator type
+| extend InitiatedByType = case(
+    isnotempty(tostring(InitiatedBy.user.userPrincipalName)) or isnotempty(tostring(InitiatedBy.user.displayName)), "User",
+    isnotempty(tostring(InitiatedBy.app.displayName)) or isnotempty(tostring(InitiatedBy.app.servicePrincipalId)), "App",
+    "Unknown")
+// Extract policy name
+| extend PolicyName = tostring(TargetResources[0].displayName)
+| project ActivityDateTime, ActivityDisplayName, PolicyName, InitiatedByType, InitiatedByActor
+
+
+List device registration policies changes
+
+AuditLogs
+| where OperationName == "Set device registration policies"
+| project TimeGenerated, ActivityDisplayName, AdditionalDetails[0].value, InitiatedBy.user.userPrincipalName   
+
+
+List Windows LAPS password changes
+
+AuditLogs
+| where OperationName == "Update device local administrator password"
+| extend DeviceName = tostring(TargetResources[0].displayName)
+| project TimeGenerated, DeviceName, Result
+
+
+List who has added an application in Entra ID
+Replace xxx@domain with the UserPrincipalName/ObjectID/name of the object you are searching for.
+
+AuditLogs
+| where TimeGenerated >= ago(1000d)
+| where OperationName in ("Add application", "Add service principal")
+| where TargetResources has "xxx@domain.com"
+// Extract application information from TargetResources
+| extend AppDisplayName = tostring(TargetResources[0].displayName)
+| extend AppId = tostring(TargetResources[0].id)
+// Determine who created the application (user or app) - coalesce returns the first non-empty value
+| extend CreatedBy = coalesce(
+    tostring(InitiatedBy.user.userPrincipalName),
+    tostring(InitiatedBy.app.displayName),
+    tostring(InitiatedBy.user.displayName),
+    tostring(InitiatedBy.app.servicePrincipalId))
+// Categorize the creator type
+| extend CreatedByType = case(
+    isnotempty(tostring(InitiatedBy.user.userPrincipalName)) or isnotempty(tostring(InitiatedBy.user.displayName)), "User",
+    isnotempty(tostring(InitiatedBy.app.displayName)) or isnotempty(tostring(InitiatedBy.app.servicePrincipalId)), "App",
+    "Unknown")
+| project TimeGenerated, OperationName, AppDisplayName, AppId, CreatedByType, CreatedBy
+
+
+List who has delete applications in Entra ID
+
+AuditLogs
+| where OperationName in ("Delete application", "Delete service principal")
+| extend tr = parse_json(TargetResources)[0]
+| extend AppDisplayName = tostring(tr.displayName)
+| extend AppId = tostring(tr.id)
+| extend InitiatedByActor = coalesce(
+    tostring(InitiatedBy.user.userPrincipalName),
+    tostring(InitiatedBy.app.displayName),
+    tostring(InitiatedBy.user.displayName),
+    tostring(InitiatedBy.app.servicePrincipalId))
+| extend InitiatedByType = case(
+    isnotempty(tostring(InitiatedBy.user.userPrincipalName)) or isnotempty(tostring(InitiatedBy.user.displayName)), "User",
+    isnotempty(tostring(InitiatedBy.app.displayName)) or isnotempty(tostring(InitiatedBy.app.servicePrincipalId)), "App",
+    "Unknown")
+| project TimeGenerated, OperationName, AppDisplayName, AppId, InitiatedByType, InitiatedByActor
+
+
+List who has created an object (user, group, device)
+Replace xxx@domain with the UserPrincipalName/ObjectID/name of the object you are searching for.
+
+AuditLogs
+| where TimeGenerated >= ago(1000d)
+| where OperationName in ("Add group", "Add user", "Add device")
+| where TargetResources has "xxx@domain"
+// Extract object information from TargetResources
+| extend ObjectDisplayName = tostring(TargetResources[0].displayName)
+| extend ObjectID = tostring(TargetResources[0].id)
+// Determine who created the object (user or app) - coalesce returns the first non-empty value
+| extend CreatedBy = coalesce(
+    tostring(InitiatedBy.user.userPrincipalName),
+    tostring(InitiatedBy.app.displayName),
+    tostring(InitiatedBy.user.displayName),
+    tostring(InitiatedBy.app.servicePrincipalId))
+// Categorize the creator type
+| extend CreatedByType = case(
+    isnotempty(tostring(InitiatedBy.user.userPrincipalName)) or isnotempty(tostring(InitiatedBy.user.displayName)), "User",
+    isnotempty(tostring(InitiatedBy.app.displayName)) or isnotempty(tostring(InitiatedBy.app.servicePrincipalId)), "App",
+    "Unknown")
+| project TimeGenerated, OperationName, ObjectDisplayName, ObjectID, CreatedByType, CreatedBy
+
+
+List who has deleted objects (user, group, device)
+UserPrincipalName of a deleted user is sometimes prefixed by a 32-char hex ID (objectId without dashes).
+This prefix hides the real UPN and breaks readability. We strip that prefix to show the actual UPN.
+We also extract whether the delete was hard and which client performed the action.
+
+
+AuditLogs
+| where ActivityDisplayName in ("Delete user","Delete group","Delete device")
+| extend tr = parse_json(TargetResources)[0]
+// Extract target object information
+| extend EntityType = tostring(tr.type)
+| extend ObjectDisplayName = tostring(tr.displayName)
+| extend rawUPN = tostring(tr.userPrincipalName)
+| extend DeletedUserUPN = coalesce(extract(@"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", 1, rawUPN), rawUPN)
+| extend DeletedUserUPN_NoGuidPrefix = coalesce(extract(@"^[0-9A-Fa-f]{32}(.*)$", 1, DeletedUserUPN), DeletedUserUPN)
+// Determine who initiated the deletion (user or app) - coalesce returns the first non-empty value
+| extend InitiatedByActor = coalesce(
+    tostring(InitiatedBy.user.userPrincipalName),
+    tostring(InitiatedBy.app.displayName),
+    tostring(InitiatedBy.user.displayName),
+    tostring(InitiatedBy.app.servicePrincipalId))
+// Categorize the initiator type
+| extend InitiatedByType = case(
+    isnotempty(tostring(InitiatedBy.user.userPrincipalName)) or isnotempty(tostring(InitiatedBy.user.displayName)), "User",
+    isnotempty(tostring(InitiatedBy.app.displayName)) or isnotempty(tostring(InitiatedBy.app.servicePrincipalId)), "App",
+    "Unknown")
+| mv-expand mp = tr.modifiedProperties
+| extend prop = tostring(mp.displayName), val = trim('"', tostring(mp.newValue))
+| summarize
+    HardDeleted = anyif(tolower(val) == "true", prop == "Is Hard Deleted"),
+    ActionClientName = anyif(val, prop == "Action Client Name")
+    by TimeGenerated,
+       ActivityDisplayName,
+       EntityType,
+       ObjectDisplayName,
+       DeletedUserUPN,
+       DeletedUserUPN_NoGuidPrefix,
+       InitiatedByType,
+       InitiatedByActor
+
+
+
+List membership changes for a specific group
+Replace xxx@domain with the ObjectID/name of the group you are searching for.
+let groupName = "xxx";
+
+AuditLogs
+| where OperationName in ("Add member to group", "Remove member from group")
+// Extract group name from modified properties based on operation type
+| extend GroupName = case(
+    OperationName == "Add member to group",
+        tostring(parse_json(tostring(parse_json(tostring(TargetResources[0].modifiedProperties))[1].newValue))),
+    OperationName == "Remove member from group",
+        tostring(parse_json(tostring(parse_json(tostring(TargetResources[0].modifiedProperties))[1].oldValue))),
+    ""
+)
+| where GroupName == groupName
+// Determine who initiated the operation (user or app) - coalesce returns the first non-empty value
+| extend InitiatedByActor = coalesce(
+    tostring(InitiatedBy.user.userPrincipalName),
+    tostring(InitiatedBy.app.displayName),
+    tostring(InitiatedBy.user.displayName),
+    tostring(InitiatedBy.app.servicePrincipalId))
+// Categorize the initiator type
+| extend InitiatedByType = case(
+    isnotempty(tostring(InitiatedBy.user.userPrincipalName)) or isnotempty(tostring(InitiatedBy.user.displayName)), "User",
+    isnotempty(tostring(InitiatedBy.app.displayName)) or isnotempty(tostring(InitiatedBy.app.servicePrincipalId)), "App",
+    "Unknown")
+// Extract member information
+| extend Member = tostring(TargetResources[0].userPrincipalName)
+| project TimeGenerated, OperationName, GroupName, InitiatedByType, InitiatedByActor, Member
+| order by TimeGenerated desc
+List membership changes for dynamic Entra ID groups
+AuditLogs
+| where Category == "GroupManagement"
+| where OperationName in ("Add member to group", "Remove member from group")
+| where parse_json(tostring(InitiatedBy.app)).displayName == "Microsoft Approval Management"
+// Extract group name from modified properties based on operation type
+| extend GroupName = case(
+    OperationName == "Add member to group",
+        tostring(parse_json(tostring(parse_json(tostring(TargetResources[0].modifiedProperties))[1].newValue))),
+    OperationName == "Remove member from group",
+        tostring(parse_json(tostring(parse_json(tostring(TargetResources[0].modifiedProperties))[1].oldValue))),
+    ""
+)
+// Determine who initiated the operation (user or app) - coalesce returns the first non-empty value
+| extend InitiatedByActor = coalesce(
+    tostring(InitiatedBy.user.userPrincipalName),
+    tostring(InitiatedBy.app.displayName),
+    tostring(InitiatedBy.user.displayName),
+    tostring(InitiatedBy.app.servicePrincipalId))
+// Categorize the initiator type
+| extend InitiatedByType = case(
+    isnotempty(tostring(InitiatedBy.user.userPrincipalName)) or isnotempty(tostring(InitiatedBy.user.displayName)), "User",
+    isnotempty(tostring(InitiatedBy.app.displayName)) or isnotempty(tostring(InitiatedBy.app.servicePrincipalId)), "App",
+    "Unknown")
+// Extract member information
+| extend MemberUser = tostring(TargetResources[0].userPrincipalName)
+| project TimeGenerated, OperationName, GroupName, InitiatedByType, InitiatedByActor, MemberUser
+| order by TimeGenerated desc
+
+
+
+List of successful Self-Service Password Reset (SSPR) events with methods used for validation, ClientType and OnPremisesAgent
+
+For your information, you can also retrieve this data in Entra ID (but it's limited to a maximum of 30 days):  https://entra.microsoft.com/#view/Microsoft_AAD_IAM/AuthenticationMethodsMenuBlade/~/RegistrationAndResetLogs > Filter Activity type: Reset or  https://entra.microsoft.com/#view/Microsoft_AAD_IAM/AuthenticationMethodsMenuBlade/~/AuthMethodsActivity > Usage tab
+
+
+AuditLogs
+// Filter for successful self-service password reset events
+| where OperationName contains "Reset password (self-service)"
+| where ResultDescription == "Successfully completed reset."
+| where Result == "success"
+// Extract user principal name and IP address of the initiator
+| extend UserPrincipalName = tostring(InitiatedBy.user.userPrincipalName)
+| extend IpAddress = tostring(InitiatedBy.user.ipAddress)
+// Expand the AdditionalDetails array to access key/value pairs
+| mv-expand AdditionalDetails
+| extend Key = tostring(AdditionalDetails["key"]), Value = tostring(AdditionalDetails["value"])
+// Aggregate key/value pairs into a dynamic object (bag)
+| summarize Details = make_bag(pack(Key, Value)) by TimeGenerated, UserPrincipalName, IpAddress
+// Extract specific fields from the bag
+// Use replace to remove brackets and quotes from the MFA method string (stored as JSON array)
+| extend ClientType = tostring(Details["ClientType"]),
+         MethodsUsedForValidation = replace(@'[\[\]"]', '', tostring(Details["MethodsUsedForValidation"])),
+         OnPremisesAgent = tostring(Details["OnPremisesAgent"])
+| project TimeGenerated, UserPrincipalName, IpAddress, ClientType, MethodsUsedForValidation, OnPremisesAgent, Details
+
+
+Groups sign-ins with SSPR type/user
+
+AuditLogs
+| where OperationName contains "Reset password (self-service)"
+| where ResultDescription == "Successfully completed reset."
+| where Result == "success"
+| extend UserPrincipalName = tostring(InitiatedBy.user.userPrincipalName)
+| mv-expand AdditionalDetails
+| extend Key = tostring(AdditionalDetails["key"]), Value = tostring(AdditionalDetails["value"])
+| summarize Details = make_bag(pack(Key, Value)) by TimeGenerated, UserPrincipalName
+| extend Method = replace(@'[\[\]"]', '', tostring(Details["MethodsUsedForValidation"]))
+| summarize Count = count() by Method, UserPrincipalName
+
+
+Chart of successful Self-Service Password Reset (SSPR) by methods used for validation
+
+
+AuditLogs
+| where OperationName contains "Reset password (self-service)"
+| where ResultDescription == "Successfully completed reset."
+| where Result == "success"
+| extend UserPrincipalName = tostring(InitiatedBy.user.userPrincipalName)
+| extend IpAddress = tostring(InitiatedBy.user.ipAddress)
+| mv-expand AdditionalDetails
+| extend Key = tostring(AdditionalDetails["key"]), Value = tostring(AdditionalDetails["value"])
+| summarize Details = make_bag(pack(Key, Value)) by TimeGenerated, UserPrincipalName, IpAddress
+// Extract and clean up the MFA method field
+// Replace removes brackets and quotes from the string (original format: ["Mobile phone SMS"])
+| extend Method = replace(@'[\[\]"]', '', tostring(Details["MethodsUsedForValidation"]))
+| summarize Count = count() by Method
+| render columnchart with (title="SSPR events by method")
+
+Result:
+
+
+
+
+QR code added to the user by an administrator for QR code sign-in
+
+AuditLogs
+| where Category == "UserManagement"
+| where ActivityDisplayName == "Admin updated security info"
+| where ResultDescription == "Admin changed QRcode Pin Authentication Method for user"
+
+
+List of synced user creations (with Entra Connect sync or Entra Cloud Sync) with creator accounts
+It seems that dirsyncEnabled did not exist before August 8 2025 (not verified).
+
+AuditLogs
+| where OperationName == "Add user"
+| where Result == "success"
+| extend tr = parse_json(TargetResources)[0]
+| extend props = tr.modifiedProperties
+| mv-apply p = props on (summarize propBag = make_bag(pack(tostring(p.displayName), tostring(p.newValue))))
+| where tostring(propBag["Action Client Name"]) contains "DirectorySync"
+// Determine who created the user (user or app) - coalesce returns the first non-empty value
+| extend createdBy = coalesce(
+    tostring(InitiatedBy.user.userPrincipalName),
+    tostring(InitiatedBy.app.displayName),
+    tostring(InitiatedBy.user.displayName),
+    tostring(InitiatedBy.app.servicePrincipalId))
+// Categorize the creator type
+| extend createdByType = case(
+    isnotempty(tostring(InitiatedBy.user.userPrincipalName)) or isnotempty(tostring(InitiatedBy.user.displayName)), "User",
+    isnotempty(tostring(InitiatedBy.app.displayName)) or isnotempty(tostring(InitiatedBy.app.servicePrincipalId)), "App",
+    "Unknown")
+// Extract user information
+| extend userName = tostring(tr.userPrincipalName)
+| extend userId = tostring(tr.id)
+| extend targetDisplayName = tostring(tr.displayName)
+| extend accountEnabled = tostring(propBag["AccountEnabled"])
+| extend lastDirSyncTime = tostring(propBag["LastDirSyncTime"])
+| extend actionClientName = tostring(propBag["Action Client Name"])
+// it seems that dirsyncEnabled did not exist before August 8 2025 (not verified)
+| extend dirSyncEnabled = tostring(propBag["DirSyncEnabled"])
+| project TimeGenerated, userName, userId, targetDisplayName, accountEnabled, createdByType, createdBy, lastDirSyncTime, actionClientName, dirSyncEnabled
+
+
+List of users created manually in Entra/Microsoft 365 (without Entra Connect sync or Entra Cloud Sync)
+Note: If the creation was done through other services, for example from Exchange Online (Admin Center or PowerShell), you will not see the name of the user who created it. Instead, you will see Microsoft Substrate Management.
+
+AuditLogs
+| where OperationName == "Add user"
+| where Result == "success"
+| extend tr = parse_json(TargetResources)[0]
+| extend props = tr.modifiedProperties
+| mv-apply p = props on (summarize propBag = make_bag(pack(tostring(p.displayName), tostring(p.newValue))))
+| where tostring(propBag["Action Client Name"]) notcontains "DirectorySync"
+| where Identity != "Microsoft B2B Admin Worker"
+| extend createdByUPN = tostring(InitiatedBy.user.userPrincipalName)
+| extend createdByApp = tostring(InitiatedBy.app.displayName)
+| extend createdBy = iff(createdByUPN != "", createdByUPN, createdByApp)
+| extend userName = tostring(tr.userPrincipalName)
+| extend userId = tostring(tr.id)
+| extend accountEnabled = tostring(propBag["AccountEnabled"])
+| project TimeGenerated, userName, userId, accountEnabled, createdBy
+
+
+List of guest users created by invitation workflow
+
+AuditLogs
+| where OperationName == "Add user"
+| where Result == "success"
+| where Identity == "Microsoft B2B Admin Worker"
+| where InitiatedBy.app.displayName != "Microsoft B2B Admin Worker"
+| extend tr = parse_json(TargetResources)[0]
+| extend props = tr.modifiedProperties
+| mv-apply p = props on (summarize propBag = make_bag(pack(tostring(p.displayName), tostring(p.newValue))))
+| extend createdByUPN = tostring(InitiatedBy.user.userPrincipalName)
+| extend createdByApp = tostring(InitiatedBy.app.displayName)
+| extend createdBy = iff(createdByUPN != "", createdByUPN, createdByApp)
+| extend userName = tostring(tr.userPrincipalName)
+| extend userId = tostring(tr.id)
+| project TimeGenerated, userName, userId, createdBy
+List of guest users created by B2B Cross Tenant Sync/Multi Tenant Organization
+AuditLogs
+| where OperationName == "Add user"
+| where Result == "success"
+| where Identity == "Microsoft B2B Admin Worker"
+| where InitiatedBy.app.displayName == "Microsoft B2B Admin Worker"
+| extend tr = parse_json(TargetResources)[0]
+| extend props = tr.modifiedProperties
+| mv-apply p = props on (summarize propBag = make_bag(pack(tostring(p.displayName), tostring(p.newValue))))
+| extend createdByUPN = tostring(InitiatedBy.user.userPrincipalName)
+| extend createdByApp = tostring(InitiatedBy.app.displayName)
+| extend createdBy = iff(createdByUPN != "", createdByUPN, createdByApp)
+| extend userName = tostring(tr.userPrincipalName)
+| extend userId = tostring(tr.id)
+| project TimeGenerated, userName, userId, createdBy
+
+
+List new credential added on an Application
+See  https://posts.specterops.io/update-dumping-entra-connect-sync-credentials-4a9114734f71
+
+AuditLogs
+| where ActivityDisplayName has_any ("Add service principal credentials", "Update application", "Add key credential")
+| where TargetResources[0].type =~ "Application"
+| extend AppName = tostring(TargetResources[0].displayName)
+| extend ChangedProps = TargetResources[0].modifiedProperties
+| extend Initiator = tostring(InitiatedBy.user.displayName)
+| project TimeGenerated, AppName, ActivityDisplayName, Initiator, ChangedProps
+| where ChangedProps has_any ("keyCredentials", "passwordCredentials")
+
+
+List Temporary Access Pass (TAP) creation
+
+AuditLogs
+| where ResultDescription == "Admin registered temporary access pass method for user"
+| extend InitiatedByActor = coalesce(
+    tostring(InitiatedBy.user.userPrincipalName),
+    tostring(InitiatedBy.app.displayName),
+    tostring(InitiatedBy.user.displayName),
+    tostring(InitiatedBy.app.servicePrincipalId))
+// Categorize the initiator type
+| extend InitiatedByType = case(
+    isnotempty(tostring(InitiatedBy.user.userPrincipalName)) or isnotempty(tostring(InitiatedBy.user.displayName)), "User",
+    isnotempty(tostring(InitiatedBy.app.displayName)) or isnotempty(tostring(InitiatedBy.app.servicePrincipalId)), "App",
+    "Unknown")
+| extend UserPrincipalName = TargetResources[0].userPrincipalName
+| project UserPrincipalName, InitiatedByActor, InitiatedByType, OperationName, ResultDescription
+
